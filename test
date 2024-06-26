@@ -1,0 +1,577 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov 07 14:47:52 2016
+@author: lefevre
+last update : 2018-04-27
+"""
+import pyFAI
+pyFAI.disable_opencl=True
+
+import fabio,os,glob,sys,copy#,imageio
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from scipy.interpolate import griddata
+import numpy as np
+matplotlib.rcParams['figure.facecolor']="w"
+import lmfit
+
+from tabulate import tabulate
+import math
+#from art import *
+import statistics
+#import fontstyle
+#############################################################################
+#########                   Defaut values                           #########
+#############################################################################
+name = '/raw/' # repertoire contenant tous les sous repertoires ; eux meme contenant les fichiers edf
+dataspec_file = 'kappa.07Feb23'
+prefix_rep_data='kappa.07Feb23_S'
+name_i0='pm3' # nom du canal i0 (vtc4, d0_cps, etc...) ; a checker dans dataspec
+scale_factor_fluo = 1#0.8235294117647058 #21.254#0.999415 #pour avoir la meme surface
+cols=2 # si option_visu = 2, nombre de colonnes
+optionsave=1 # si option_visu = 3 (4), sauvegarde les data
+option_show=1 #si option_visu =3 (4), affiche le pyplot a la fin
+option_scale_11=[None,[5400,13000],[25000,45000],[0.0004,0.0009]]
+shiftroi1=(25,-5)
+roi1=[(270,30,350,100)]
+roi2=[(341,62,351,72)]
+roi3=[(321,62,371,72)]
+roi4=[(25,25,75,75)]
+roi5=[(271,22,421,111)]
+roi6=[(281,62,411,72)]
+option_show_roi = [1,0,0,0] #trace ou non les differentes roi sur les graphs ; achtung les coordonnees sont fixes.
+option_width_roi=[2,2,2,2] #epaisseur du trai (2 = bold)
+option_color_roi=['w','w','w','w'] # couleur de la roi
+choice_roi=roi1 #choix de la roi a considerer pour l'integration de I
+mask_fluo=[(5,5,85,90)]
+option_show_mask_fluo=1 # (0) :non / ne corrige pas de la fluo
+                        # (1) : oui / corrige de la fluo si option_visu=3
+mask_Intensite=[(184,5,200,23)]
+option_show_mask_I=0 #(0) n'affiche pas et ne considere pas pour l'integration
+delays = 60
+dpi = 150
+repeat=False       #pour le gif, boucle infini ou pas
+legend_annotate=True #pour le gif, affiche le numero d'image
+savepath=os.getcwd()+'/save/'
+#############################################################################
+#########                   Defaut values                           #########
+#############################################################################
+
+def ncpu():
+    nb_cpu=multiprocessing.cpu_count()
+    return nb_cpu
+
+def ub_matrix_extractor(specfile, scanno, verbose=False):   
+    try:
+        text = open(specfile, 'r')
+        Lines = text.readlines()
+        count = 0
+        UB_matrix = np.zeros(9)
+        # Strips the newline character
+        for line in Lines:
+            if line.startswith("#S "+str(scanno)) or count ==1:
+                #if count == 0:
+                    #if verbose:
+                        #print("Line{}: {}".format(count, line.strip()))
+                count = 1
+                if line.startswith("#G3 "):
+                    count = 2
+                    newline=line.strip()
+                    newline = newline.split(' ')[1:]
+                    for j, ii in enumerate(newline): 
+                        UB_matrix[j] = float(ii)
+                    #if verbose:
+                    #    print("Line{}: {}".format(count, line.strip()))
+                    UB_matrix = UB_matrix.reshape(-1,3)
+                    return UB_matrix
+                
+        UB_matrix = UB_matrix.reshape(-1,3)
+        if np.all(UB_matrix) == 0:
+            UB_matrix = np.eye(3)
+    except:
+        UB_matrix = np.eye(3)
+    return UB_matrix
+
+
+def dictionnaire():    
+    dico_CCD={'distance':1.085, #in meter
+                    'px1':0.00013,#pixel size in dir1 (in m)
+                    'px2':0.00013,
+                    'Npx1':578,#nb of pixels in dir1
+                    'Npx2':120,#nb of pixels in dir2
+                    'c1' : 346,#beam center/detector center?
+                    'c2':66,
+                    }
+    dico_fit_dbeam={'A':10,
+                'xo':150,
+                'yo':50,
+                'sig_x':1,
+                'sig_y':1,
+                'offset':0
+                }
+    #A,cen_x, cen_y, sig_x, sig_y, offset
+    
+    
+    dico_path={'dataDir':os.getcwd(),
+               'savepath':os.getcwd(),
+               'dataspec_file':dataspec_file}
+    
+    dico_roi={'roi1':roi1,
+              'roi2':roi2,
+              'roi3':roi3,
+              'roi4':roi4,}
+    
+    dico_rsm={'path_file':'/home/lefevre/Documents/REXS/2024-d2am/raw/images/24Jan31S70_36199.edf',
+              'scan_number_metadata':616,
+              'image_mask_corrected_sufix':'',
+              
+              }
+    
+    dic={'dataDir':os.getcwd(), # dir where exp data are located
+         'prefix_rep_data':'kappa.07Feb23_S', #prefix of subdirectorie where scans number scanid are saved
+         'dataspec':dataspec_file, # dataspec file path
+         'savepath':savepath,
+         'image_path':os.getcwd()+'/raw/images/',
+         'name_i0':name_i0,
+         'spec_sensor':'pm1',
+         'Scanid':[1],
+         'ratio_ROI_fluo':scale_factor_fluo,
+         'command_search':'Escan',
+         'image_number':1, # #image among the different edf files
+         'val_max':20, # valeur vmax pour les graph 2D
+         'option_show_mask_fluo':option_show_mask_fluo,
+         'scale_factor_fluo':scale_factor_fluo,
+         'cols':cols,
+         'optionsave':optionsave,
+         'option_show':option_show,
+         'choice_roi':choice_roi,
+         'roi1':roi1,
+         'roi2':roi2,
+         'roi3':roi3,
+         'roi4':roi4,
+         'option_show_roi':option_show_roi, # default [1,0,0,0] to show the roi on the graphs
+         'option_width_roi':option_width_roi,
+         'option_color_roi':option_color_roi,
+         'ROI_fluo':mask_fluo,
+         'mask_Intensite':mask_Intensite,
+         'option_show_mask_I':option_show_mask_I,
+         'option_show_REXS_fluo':[1,1], #[plot REXS, plot fluo]
+         'threshold_mask':100, # valeur au desssus de laquelle les pixels seront considere comme mad
+         'mask_nb':10, # nbre de fichier a passer a la moulinette pour faire le mask
+         'mask_directory':'/home/lefevre/Documents/REXS/2024-d2am/save/Mask/mask.txt',
+         'dbeam':dico_fit_dbeam,
+         'XPAD':dico_CCD,
+         'RSM':dico_rsm,
+         'Symbol_element':'Fe'
+         
+         }
+    return dic
+
+
+#############################################################################
+#############################################################################
+
+def detector_update(**kwargs):
+    if 'distance' in kwargs:
+        dico_CCD['distance']=kwargs['distance']
+    if 'px1' in kwargs:
+        dico_CCD['px1']=kwargs['px1']
+    if 'px2' in kwargs:
+        dico_CCD['px2']=kwargs['px2']
+    if 'Npx1' in kwargs:
+        dico_CCD['Npx1']=kwargs['Npx1']
+    if 'Npx2' in kwargs:
+        dico_CCD['Npx2']=kwargs['Npx2']
+    if 'c1' in kwargs:
+        dico_CCD['c1']=kwargs['c1']
+    if 'c2' in kwargs:
+        dico_CCD['c2']=kwargs['c2']
+    if 'tilt' in kwargs:
+        dico_CCD['tilt']=kwargs['tilt']
+    if 'tiltplanerotation' in kwargs:
+        dico_CCD['tiltplanerotation']=kwargs['tiltplanerotation']
+    if 'detector_rot' in kwargs:
+        dico_CCD['detector_rot']=kwargs['detector_rot']
+
+    dic['detector_param']=dico_CCD
+
+def list_file(path,**kwargs):
+    try:
+        option_check=kwargs['debug']
+    except:
+        option_check=False
+
+    lis=path+'/*.edf'
+    liste= glob.glob(lis)
+    liste.sort()
+#  liste = liste.sort(key=os.path.getmtime)
+  #print(liste)
+    num=len(liste)
+        
+    if option_check==True:
+        print('###############################################################')
+        tprint('list_file',font="Big")
+        print('###############################################################')
+        print('## Inputs :')
+        print('    path :',path)    
+        print('')
+        print('## Intermediate :')
+        print('    lis :',lis)
+        print('## Outputs :')
+        print('    liste :')
+        for i in liste:
+            print('        ',i)
+        print('    num :',num)    
+        
+    return liste,num
+
+def check_sub(liste_subdirect,Scanid,**kwargs):
+    try:
+        option_check=kwargs['debug']
+    except:
+        option_check=False
+
+    if option_check==True:
+        stock_scan_id=[]
+        stock_scan=[]
+              
+    liste_sub,scan_name=[],[]
+    for i in range(len(Scanid)):
+      #scan='S'+str(Scanid[i])
+      scan_id='S'+str(Scanid[i])
+      #scan='S'+str(Scanid[i])+'/' 
+      scan=prefix_rep_data+str(Scanid[i])+'/'
+      if option_check==True:
+          stock_scan_id.append(scan_id)
+          stock_scan.append(scan)
+        
+    for j in range(len(liste_subdirect)):
+      #if liste_subdirect[j].endswith(scan):  
+      if liste_subdirect[j].endswith(scan_id+'/'):
+         liste_sub.append(liste_subdirect[j])
+         scan_name.append(scan_id)
+
+    if option_check==True:
+        print('###############################################################')
+        tprint('checksub',font="Big")
+        print('###############################################################')
+        print('## Inputs :')
+        print('    Scanid :',Scanid)
+        print('    liste_subdirect :')      
+        for i in liste_subdirect:
+            print('        ',i)        
+        print('')
+        print('## Intermediate :')
+        print('    len(Scanid) :',len(Scanid))
+        print('    scan_id :')
+        for i in stock_scan_id:
+            print('        ',i)
+        print('    scan :')
+        for i in stock_scan:
+            print('        ',i)        
+        print('')
+        print('## Outputs :')
+        print('    liste_sub :')
+        for i in liste_subdirect:
+            print('        ',i)     
+        print('    scan_name :')
+        for i in scan_name:
+            print('        ',i)         
+    return liste_sub,scan_name
+
+
+def stop():
+    sys.exit()
+
+
+def readscand2am(specfile,scanid):
+  h,d=ReadSpec(specfile,scanid)
+  """
+  h = header
+  d = dictionnaire des data {'pfoil','pico1',Epoch','Imach','pico4','Ecod','img','Seconds','roi2','roi3','roi1','roi4',
+                             'vct1','vct3','vct2','vct4','mono','Energy','pico2','pico3','Emono','pseudoC'}
+  """
+  return h,d
+
+def ReadSpec(fname,scan,pos=None):
+   f=open(fname,'r')
+   s="#S %i"%scan
+   title=0
+   headers={}
+   headers["geom"]=""
+   while 1:
+      title=f.readline()
+      if s == title[0:len(s)]:
+         break
+      if "#O0"==title[0:3]:#Motor names, in the order reported in
+         #:TODO: some motors have spaces in their names !!
+         headers["O"]=title.split()[1:]
+      else:
+         title=title.replace('Motor 32','Motor_32') #KLUDGE for id01...
+         if "#O"==title[0:2]:#Motor names, continued
+            headers["O"]+=title.split()[1:]
+      if headers["geom"]=="" and "#C"==title[0:2]:# first comment gives used geometry / spec session name (gnio, psic, dafs)
+         headers["geom"]=title.split()[1]
+      if len(title)==0:
+         break;
+   headers["S"]=title[2:]
+   s="#L"
+   coltit=0
+   if pos!=None:
+     f.seek(pos)
+   while 1:
+      coltit=f.readline()
+      #print coltit
+      if s == coltit[0:len(s)]:
+         k=coltit.split()[0][1:]
+         headers[k]=coltit[len(k)+1:]
+         break
+      if len(coltit)==0:
+         break
+      if coltit[0:2]=="#D" or coltit[0:2]=="#G" or coltit[0:2]=="#Q":
+         coltit=coltit.split()
+         headers[coltit[0][1:]]=coltit[1:]
+      elif coltit[0:3]=="#P0":
+         headers["P"]=coltit.split()[1:]
+      elif coltit[0:2]=="#P":
+         headers["P"]+=coltit.split()[1:]
+      else:
+         k=coltit.split()[0][1:]
+         if k in headers:
+           if type(headers[k])!=type([]):
+             headers[k]=[headers[k]]
+           headers[k].append(coltit[len(k)+1:])
+         else:
+           headers[k]=coltit[len(k)+1:]
+   d={}
+   # KLUDGE: replace "Counter 1" by Counter_1
+   for i in range(10):
+     coltit=coltit.replace("Counter %d"%i,"Counter_%d"%i)
+   coltit=coltit.split()
+   for i in range(1,len(coltit)):
+   	d[coltit[i]]=[]
+   while 1:
+      l=f.readline()
+      if len(l)<2:
+         break;
+      if l[0:2]=="#C":
+        #if headers.has_key("C"):
+        if "C" in headers:
+          headers["C"].append(l[2:].strip())
+        else:
+          headers["C"]=[l[2:].strip()]
+      if len(l)>5:
+        if l[0:5]=="#C qq":
+          l=l.strip()
+          if "qq" not in headers:
+          #if headers.has_key("qq")==False:
+            headers["qq"]={}
+          headers["qq"][l[3:].split('=')[0]]=l[5:].split('=')[1]
+          continue
+      if l[0]=="#":continue
+      if l[0]=="@":
+         while l[-2]=='\\':l=f.readline()
+         continue
+      l=l.split()
+      for i in range(1,len(coltit)):
+         d[coltit[i]].append(float(l[i-1]))
+
+   #print coltit
+   nb=len(d[coltit[1]])
+
+   for i in range(1,len(coltit)):
+      #a=np.zeros(nb,dtype=float32)
+      a=np.zeros(nb,dtype='f')
+      for j in range(nb):
+        a[j]=d[coltit[i]][j]
+      d[coltit[i]]=copy.deepcopy(a)
+   f.close()
+   # Transform #O and #P headers into a dictionnary of motor positions, *before* the beginning of the scan
+   #if headers.has_key("P") and headers.has_key("O"):
+   if "P" in headers and "O" in headers:
+      if len(headers["P"])==len(headers["O"]):
+         headers["motors"]={}
+         for i in range(len(headers["P"])):
+            headers["motors"][headers["O"][i]]=float(headers["P"][i])
+
+   #print d
+   return headers,d
+
+def rectangle(ax,xmin,xmax,ymin,ymax,color,width):
+    w,h = xmax-xmin, ymax-ymin
+    rect = patches.Rectangle((xmin,ymin),w,h,linewidth=width,edgecolor=color,facecolor='none')
+    ax.add_patch(rect)
+
+def rectangle_fill(ax,xmin,xmax,ymin,ymax,color,width,face_color):
+    w,h = xmax-xmin, ymax-ymin
+    rect = patches.Rectangle((xmin,ymin),w,h,linewidth=width,edgecolor=color,facecolor=face_color)
+    ax.add_patch(rect)
+
+def allroi(ax,dic):
+  if dic['option_show_roi'][0]==1:
+      #roi1=(359,56,379,76)
+      for i in range(len(dic['roi1'])):
+          rectangle(ax,dic['roi1'][i][0],dic['roi1'][i][2],dic['roi1'][i][1],dic['roi1'][i][3],dic['option_color_roi'][0],dic['option_width_roi'][0]) #roi1
+      #rectangle(ax,359,379,56,76,'r',1)
+  if dic['option_show_roi'][1]==1:
+      for i in range(len(dic['roi2'])):
+          rectangle(ax,dic['roi2'][i][0],dic['roi2'][i][2],dic['roi2'][i][1],dic['roi2'][i][3],dic['option_color_roi'][1],dic['option_width_roi'][1]) #roi2
+  if dic['option_show_roi'][2]==1:
+      for i in range(len(dic['roi3'])):
+          rectangle(ax,dic['roi3'][i][0],dic['roi3'][i][2],dic['roi3'][i][1],dic['roi3'][i][3],dic['option_color_roi'][2],dic['option_width_roi'][2]) #roi3
+  if dic['option_show_roi'][3]==1:
+      for i in range(len(dic['roi4'])):
+          rectangle(ax,dic['roi4'][i][0],dic['roi4'][i][2],dic['roi4'][i][1],dic['roi4'][i][3],dic['option_color_roi'][3],dic['option_width_roi'][3]) #roi4
+
+def annotate(ax,n,size):
+    ax.annotate(str(n),xy=(0,0), xytext=(10,25), fontsize=size,color='white')
+
+def integrate(im,coord):
+    inte=im.integrate_area(coord)
+    return inte
+
+def integrate2(im,coord):
+    #roi1=(359,56,379,76)
+    sume=0
+    for k in range(len(coord)):#e.g. si [(coord1),(coord2),...]
+        for i in range(coord[k][0],coord[k][2]+1,1):#on se balade sur les x
+            for j in range(coord[k][1],coord[k][3]+1,1):#on se balade sur les y
+                sume+=im.data[j,i]
+    return sume
+
+
+def str_find(string,char):
+    num=len(string)
+    for i in range(len(string)):
+        if string[num-i-1]==char:
+            val = num-i-1
+            break
+
+    return string[val:len(string)]
+
+#def Int_nrj(num,liste,scan_name,pp,dic,option_visu):
+def Int_nrj(num,liste,scan_name,dic,option_visu):
+    nrj,Int=[],[]
+    Int_mask=[] #intensite a l'interieur des mask
+    correc=[]
+
+    if option_visu!=4:
+        fig = plt.figure()
+        fig.set_canvas(plt.gcf().canvas)
+
+    for i in range(num):
+        im = fabio.open(liste[i])
+        lam=float(im.header['Lambda'])
+        nrj.append(round(12398.3/lam,1))
+        Int.append(integrate2(im,dic['choice_roi']))
+
+        if dic['option_show_mask_I']==1:
+            Int_mask.append(integrate2(dic['mask_Intensite']))
+
+        if dic['option_show_mask_fluo']==1:
+            cor=0
+            cor=integrate2(im,dic['ROI_fluo'])
+            cor*=dic['scale_factor_fluo']
+            correc.append(cor)
+        else:
+            correc=[0 for i in range(len(Int))]
+
+    if dic['option_show_mask_I']==1:
+        Int=[(Int[i]-Int_mask[i]) for i in range(len(nrj))]
+
+    scan_=float(scan_name.replace('S',''))
+    #h,d=readscand2am(specfile,scan_)
+    h,d=readscand2am(dic['dataspec'],scan_)
+    hkl=[int(round(float(h['Q'][0]))),int(round(float(h['Q'][1]))),int(round(float(h['Q'][2])))]
+    
+    if dic['name_i0']==None:
+        print('**** Warning : i0 = 1 (ie undefined) ****')
+        i0=np.asarray([1 for i in range(len(Int))])
+    else:
+        print('  i0 sensor : ',dic['name_i0'])
+        i0=d[dic['name_i0']]
+    
+    
+    if option_visu==4:
+      if dic['option_show_mask_fluo']==0:
+        Int1=[Int[i]/i0[i] for i in range(len(Int))]
+        return nrj,Int1
+
+      if dic['option_show_mask_fluo']==1:
+        Int3=[(Int[i]-correc[i])/i0[i] for i in range(len(nrj))]
+        return nrj,Int3
+
+    
+    if dic['option_show_mask_fluo']==0:
+        Int1=[Int[i]/i0[i] for i in range(len(Int))]
+        if dic['option_show_REXS_fluo'][0]==1:
+            plt.plot(nrj,Int1,'-ko',label='raw')
+            plt.ylabel('I/Io')
+
+    if dic['option_show_mask_fluo']==1:
+        Int3=[(Int[i]-correc[i])/i0[i] for i in range(len(nrj))]
+        #plt.plot(nrj,Int,'-ko',label='raw')
+        if dic['option_show_REXS_fluo'][0]==1:
+            plt.plot(nrj,Int3,'-ko',label='correc.')
+            plt.ylabel('Icorr/Io')
+
+    #plt.legend(loc="upper left")
+    if dic['option_show_REXS_fluo'][0]==1:
+        plt.title(str(hkl) + ': Escan_'+str(scan_name))
+        plt.xlabel('Energy (eV)')
+        plt.xlim(nrj[0],nrj[len(nrj)-1])
+
+    if dic['optionsave']==1:
+        #namee=os.getcwd()+'/save/'+str(hkl[0])+str(hkl[1])+str(hkl[2])+symbol+'.dat'
+        namee=dic['savepath']+str(hkl[0])+str(hkl[1])+str(hkl[2])+dic['Symbol_element']+'.dat'
+        fichier=open(namee,"w")
+        if dic['option_show_mask_fluo']==0:
+            for i in range(len(nrj)):
+                fichier.write(str(nrj[i])+' '+str(Int1[i])+'\n')
+
+        if dic['option_show_mask_fluo']==1:
+            for i in range(len(nrj)):
+                fichier.write(str(nrj[i])+' '+str(Int3[i])+'\n')
+        fichier.close()
+        print('REXS data saved in %s'%(namee))
+        
+        """
+        savenam=dic['savepath']+'image_scanid_%s_%s.png'%(dic['Scanid'][0],dic['val'])
+        #savenam=os.getcwd()+'/save/image_scanid_%s_%s.png'%(dic['Scanid'][0],dic['val'])
+        plt.savefig(savenam,dpi=300)
+        print('image saved in %s'%(dic['savepath']))
+        """
+
+    if dic['option_show_REXS_fluo'][0]==1:
+        plt.tick_params(
+            axis='y',
+            which='both',
+            left='on',
+            right='on',
+            labelleft='on')
+
+    
+    if dic['option_show_REXS_fluo'][0]==1:
+        savename=dic['savepath']+'REXS_%s.png'%(scan_name)
+        plt.savefig(savename,dpi=300)
+        #pp.savefig(plt.gcf())
+
+    # faire les figures en png
+    if dic['option_show_REXS_fluo'][1]==1:
+        plt.figure()
+        fig,ax=plt.subplots(1,1)
+        ax.plot(nrj,correc/i0,'-ko')
+        ax.set_xlabel(r'Energy (eV)')
+        ax.set_ylabel(r'Fluo')
+        #savename=os.getcwd()+'/save/fluo_%s.png'%(scan_name)
+        savename=dic['savepath']+'fluo_%s.png'%(scan_name)
+        plt.savefig(savename,dpi=300)
+
+    #savedataname=os.getcwd()+'/save/fluo_%s.dat'%(scan_name)
+    savedataname=dic['savepath']+'fluo_%s.dat'%(scan_name)
+    with open(savedataname,"w") as f:
+        for i in range(len(nrj)):
+            f.write(str(nrj[i])+' '+str(correc[i]/i0[i])+'\n')
+    fichier.close()
+    print('Fluo data
